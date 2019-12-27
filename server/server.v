@@ -7,7 +7,6 @@ import (
 	net
 	http
 	net.urllib
-	os
 	strings
 )
 
@@ -16,34 +15,34 @@ const (
 	HTTP_REQUEST_TYPICAL_SIZE = 1024
 )
 
-struct Server {
-pub mut:
-	port int
-	routes []Route
-	middlewares []Middleware
+pub struct Context {
+pub:
+    current_route string
+mut:
+    req Request
+    res Response
 }
+
+pub struct Server {
+pub mut:
+	port int = 80
+	routes []Route
+}
+
+type Handler fn(ctx mut Context)
 
 // create server
 pub fn new() Server {
-	return Server{ routes: [], middlewares: [] }
+	return Server{ routes: [] }
 }
 
-pub fn (srv mut Server) serve(port int) {
+pub fn (srv mut Server) create(handler Handler, port int) {
 	println('Serving at port: $port')
 	srv.port = port
-	listener := net.listen(srv.port) or {panic("Failed to listen to port $port")}
+	listener := net.listen(port) or {panic("Failed to listen to port $port")}
 	for {
 		conn := listener.accept() or {panic("conn accept() failed.")}
-		srv.handle_http_connection(conn)
-	}
-}
-
-pub fn (srv mut Server) serve_static(root_folder string) {
-	location := os.getwd() + '/' + root_folder
-	if !os.dir_exists(location) { return }
-	files := os.ls(location) or { return }
-	for file in files {
-		srv.get('/${root_folder}/${file}', get_static_file_content)
+		srv.handle_http_connection(conn, handler)
 	}
 }
 
@@ -62,17 +61,13 @@ fn write_body(res &Response, conn &net.Socket) {
 	conn.close() or {}
 }
 
-fn get_static_file_content(req Request, res mut Response) {
-	res.send_file(req.path, 200)
-}
-
 fn con500(conn &net.Socket){
 	mut eres := Response{}
 	eres.send('<h1>500 Internal Server Error</h1>', 500)
 	write_body(eres, conn)
 }
 
-fn (srv mut Server) handle_http_connection(conn &net.Socket){	
+fn (srv Server) handle_http_connection(conn &net.Socket, handler Handler) {	
 	request_lines := read_http_request_lines( conn )
 	if request_lines.len < 1 {
 		con500(conn)
@@ -90,20 +85,18 @@ fn (srv mut Server) handle_http_connection(conn &net.Socket){
 		return
 	}
 	
-	params, matched_rte := srv.find(data[0], req_path.path)
-	mut rte := if matched_rte.name.len != 0 { matched_rte } else { Route{ctx: Context{ req: Request{}, res: Response{}}} }
+	params, raw_path, matched_rte := srv.find(data[0], req_path.path)
+	rte := if matched_rte.name.len != 0 { matched_rte } else { Route{name: req_path.path, method: data[0]} }
+	mut ctx := Context{ req: Request{}, res: Response{}, current_route: if matched_rte.name.len != 0 { raw_path } else { req_path.path } }
+	ctx.res.status_code = 200
+	ctx.req.headers = http.parse_headers(request_lines)
+	ctx.req.method = data[0]
+	ctx.req.path = req_path.path
+	ctx.res.path = req_path.path
+	ctx.req.params = params
 	
-	mut req := rte.ctx.req
-	mut res := rte.ctx.res
-	res.status_code = 200
-	req.headers = http.parse_headers(request_lines)
-	req.method = data[0]
-	req.path = req_path.path
-	res.path = req_path.path
-	req.params = params
-	
-	if 'Cookie' in req.headers {
-		cookies_arr := req.headers['Cookie'].split('; ')
+	if 'Cookie' in ctx.req.headers {
+		cookies_arr := ctx.req.headers['Cookie'].split('; ')
 		
 		for cookie_data in cookies_arr {
 			ck := cookie_data.split('=')
@@ -111,42 +104,28 @@ fn (srv mut Server) handle_http_connection(conn &net.Socket){
 				con500(conn)
 				return
 			}
-			req.cookies[ck[0]] = ck_val
+			ctx.req.cookies[ck[0]] = ck_val
 		}
 	}
 	
 	if req_path.raw_query.len != 0 {
 		query_map := req_path.query().data
 		for q in query_map.keys() {
-			req.query[q] = query_map[q].data[0]
+			ctx.req.query[q] = query_map[q].data[0]
 		}
 	}
 
 	if rte.method == 'POST' {
 		body_arr := first_line.split(separator)
-		req.body = body_arr[body_arr.len-1]
+		ctx.req.body = body_arr[body_arr.len-1]
 	}
 
-	if matched_rte.name.len != 0 {
-		handler := rte.handler
-		handler(req, mut res)
-	} else {
-		res.set_header('Content-Type', 'text/html')
-		res.send('<h1>404 Not Found</h1>', 404)
-	}
-	
-	if !('Content-Type' in res.headers) {
-		res.set_header('Content-Type', 'text/plain')
+	if !('Content-Type' in ctx.req.headers) {
+		ctx.res.set_header('Content-Type', 'text/plain')
 	}
 
-	for mw in srv.middlewares {
-		if '*' in mw.whitelist || (req_path.path in mw.whitelist || !(req_path.path in mw.blacklist)) {
-			mw_handler := mw.handler
-			mw_handler(req, mut res)
-		}
-	}
-
-	write_body(res, conn)
+	handler(mut ctx)
+	write_body(ctx.res, conn)
 }
 
 fn read_http_request_lines(sock &net.Socket) []string {
@@ -157,8 +136,7 @@ fn read_http_request_lines(sock &net.Socket) []string {
 		mut res := '' // The buffered line, including the ending \n.
 		mut line := '' // The current line segment. Can be a partial without \n in it.
 		for {
-			n := int(C.recv(sock.sockfd, buf, HTTP_REQUEST_TYPICAL_SIZE-1, net.MSG_PEEK))
-			//println('>> recv: ${n:4d} bytes .')
+			n := C.recv(sock.sockfd, buf, HTTP_REQUEST_TYPICAL_SIZE-1, net.MSG_PEEK)
 			if n == -1 { return lines }
 			if n == 0 {	return lines }
 			buf[n] = `\0`

@@ -2,12 +2,6 @@ module server
 
 import os
 
-struct Context {
-mut:
-    req Request
-    res Response
-}
-
 pub struct Request {
 pub mut:
     body string
