@@ -73,22 +73,20 @@ fn (srv mut Server) handle_http_connection(conn &net.Socket) {
 	}
 
 	first_line := request_lines[0]
-	data := first_line.split(' ')
-	if data.len < 2 {
+	method_and_path := first_line.split(' ')
+	if method_and_path.len < 2 {
 		send_500(conn)
 		return
 	}
 	
-	req_path := urllib.parse(data[1]) or {
+	req_path := urllib.parse(method_and_path[1]) or {
 		send_500(conn)
 		return
 	}
-	
-	println(request_lines.join('\n'))
 	
 	mut req := ctx.Request{
 		headers: http.parse_headers(request_lines),
-		method: data[0],
+		method: method_and_path[0],
 		path: req_path.path,
 		cookies: map[string]string,
 		query: map[string]string,
